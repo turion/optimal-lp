@@ -1,0 +1,49 @@
+cabal-version:      3.0
+name:               optimal-lp
+version:            0.1.0.0
+-- synopsis:
+-- description:
+license:            MIT
+license-file:       LICENSE
+author:             Manuel Bärenz
+maintainer:         programming@manuelbaerenz.de
+-- copyright:
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+-- extra-source-files:
+
+common opts
+    ghc-options: -Wall
+    default-language: GHC2021
+    build-depends:
+        base ^>=4.17.2.0
+      , transformers >= 0.5 && < 0.7
+      , text ^>= 2.0
+      , containers >= 0.6
+      , sop-core ^>= 0.5
+      , scientific ^>= 0.3
+      , MIP ^>= 0.1.1.0
+    --   , glpk-hs ^>= 0.8
+    default-extensions:
+        DataKinds
+        DerivingStrategies
+        DerivingVia
+        OverloadedStrings
+        TypeFamilies
+
+library
+    import:           opts
+    exposed-modules:  Optimal
+    -- other-modules:
+    -- other-extensions:
+    hs-source-dirs:   src
+
+test-suite optimal-lp-test
+    import:           opts
+    -- other-modules:
+    -- other-extensions:
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Main.hs
+    build-depends:
+        optimal-lp
