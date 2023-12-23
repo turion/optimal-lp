@@ -228,6 +228,11 @@ optimalFunction name = do
         { smaller = Data.Set.fromList $ flip VariableValue (IntegerLiteral 1) <$> vars
         , bigger = singleton (LiteralValue (IntegerLiteral 1))
         }
+    addConstraint -- FIXME I want equality constraints as well!
+      Constraint
+        { bigger = Data.Set.fromList $ flip VariableValue (IntegerLiteral 1) <$> vars
+        , smaller = singleton (LiteralValue (IntegerLiteral 1))
+        }
   return $ LpOptimizedFunction varsAndValues
 
 (<=!) :: LpOptimizedValue LpOptimizedInteger -> Integer -> OptiM ranges ()

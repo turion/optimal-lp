@@ -30,7 +30,7 @@ instance Varnameable Topic where
   varname = getTopic
 
 students :: [Student]
-students = ["alice", "bob", "charlotte"]
+students = ["alice", "bob", "charlotte", "daniel"]
 
 topics :: [Topic]
 topics = ["X", "Y"]
@@ -38,10 +38,11 @@ topics = ["X", "Y"]
 votes :: [(Student, Topic, Scientific)]
 votes =
   [ ("alice", "X", 4)
-  , ("bob", "X", 3)
+  , ("bob", "X", 4)
   , ("bob", "Y", 2)
   , ("charlotte", "X", 3)
   , ("charlotte", "Y", 3)
+  , ("daniel", "X", 1)
   ]
 
 -- "Some monad tutorials start with Maybe, some with Lists. Does it matter? I hope not, I found functions to convert one into the other"
