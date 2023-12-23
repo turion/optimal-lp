@@ -64,6 +64,16 @@ problem = do
   forEvery @Topic $ \topic -> LpSize (LpPreimage topicOf topic) <=! capacity topic
   return topicOf
 
+{-
+Ways to make it more complex:
+* sort topics into rooms and/or times
+* sort teachers into topics
+* optimize teachers, then optimize students again with fixed teachers
+* find minimal set of constraints that need to be relaxed to make it feasible
+* only take sorted preferences into account, not cardinalities
+* optimize minimum student happiness
+-}
+
 main :: IO ()
 main = do
   topicOf <- runOptiM problem $ students :* topics :* Nil -- FIXME nicer constructors for this list
