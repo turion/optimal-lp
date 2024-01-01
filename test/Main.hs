@@ -60,7 +60,7 @@ capacity :: Topic -> Integer
 capacity "X" = 2
 capacity "Y" = 2
 
-problem :: OptiM '[Student, Topic] (LpOptimizedValue (FiniteType Student :~> FiniteType Topic))
+problem :: OptiM '[Student, Topic] (LpOptimizedValue (Student -> Topic))
 problem = do
   topicOf <- optimalFunction @Student @Topic
   forEvery @Student $ \student -> better $ lookupVote0 student <$$> topicOf $$ student

@@ -122,51 +122,33 @@ data LpAssignment = LpAssignment
 
 -- FIXME also a class "IsIntegerVector"
 
--- | Join these with the other type type
-data LpOptimizedType
-  = LpOptimizedInteger
-  | LpOptimizedFloat
-  | -- | Function type
-    -- | (:<~>) LpOptimizedType LpOptimizedType -- ^ Relation type -- FIXME support this
-    (:~>) LpOptimizedType LpOptimizedType
-  | LpOptimizedSet LpOptimizedType
-  | FiniteType Type
-
-type family DecodeLpOptimizedType (t :: LpOptimizedType) :: Type where
-  DecodeLpOptimizedType 'LpOptimizedInteger = Integer
-  DecodeLpOptimizedType 'LpOptimizedFloat = Scientific
-  DecodeLpOptimizedType (t1 :~> t2) = DecodeLpOptimizedType t1 -> DecodeLpOptimizedType t2
-  DecodeLpOptimizedType (FiniteType t) = t
-  DecodeLpOptimizedType (LpOptimizedSet t) = Set (DecodeLpOptimizedType t)
-
--- FIXME Or do I just want to tag directly with Haskell types?
-data LpOptimizedValue (a :: LpOptimizedType) where
-  LpOptimizedIntegerValue :: Variable -> LpOptimizedValue LpOptimizedInteger
-  LpOptimizedFloatValue :: Variable -> LpOptimizedValue LpOptimizedFloat
-  LpOptimizedFunction :: (Ord a) => Map a (Map Variable b) -> LpOptimizedValue (FiniteType a :~> FiniteType b) -- FIXME very very restrictive
-  -- LpOptimizedRelation :: LpOptimizedValue a -> LpOptimizedValue b -> LpOptimizedValue (a :<~> b)
-  LpApplication :: LpOptimizedValue (FiniteType a :~> b) -> a -> LpOptimizedValue b -- FIXME very restrictive
-  LpOptimizedFinite :: Map Variable a -> LpOptimizedValue (FiniteType a)
-  -- LpOptimizedSetValue :: Set (LpOptimizedValue a) -> LpOptimizedValue (LpOptimizedSet a)
-  LpPreimage :: (Eq b) => LpOptimizedValue (FiniteType a :~> FiniteType b) -> b -> LpOptimizedValue (LpOptimizedSet (FiniteType a)) -- FIXME very very restrictive
-  LpSize :: LpOptimizedValue (LpOptimizedSet a) -> LpOptimizedValue LpOptimizedInteger
-  LpFmap :: (a -> Scientific) -> LpOptimizedValue (FiniteType a) -> LpOptimizedValue LpOptimizedFloat
+data LpOptimizedValue a where
+  LpOptimizedIntegerValue :: Variable -> LpOptimizedValue Integer
+  LpOptimizedFloatValue :: Variable -> LpOptimizedValue Scientific
+  LpOptimizedFunction :: (Ord a) => Map a (Map Variable b) -> LpOptimizedValue (a -> b)
+  -- LpOptimizedRelation :: LpOptimizedValue a -> LpOptimizedValue b -> LpOptimizedValue (Set (a, b))
+  LpApplication :: LpOptimizedValue (a -> b) -> a -> LpOptimizedValue b -- FIXME restrictive: Want to apply an arbitrary LpOptimizedValue
+  LpOptimizedFinite :: Map Variable a -> LpOptimizedValue a
+  -- LpOptimizedSetValue :: Set (LpOptimizedValue a) -> LpOptimizedValue (Set a)
+  LpPreimage :: (Eq b) => LpOptimizedValue (a -> b) -> b -> LpOptimizedValue (Set a) -- FIXME restrictive: Want to apply an arbitrary LpOptimizedValue
+  LpSize :: LpOptimizedValue (Set a) -> LpOptimizedValue Integer
+  LpFmap :: (a -> Scientific) -> LpOptimizedValue a -> LpOptimizedValue Scientific
 
 infixl 7 $$
 
-($$) :: LpOptimizedValue ('FiniteType a ':~> b) -> a -> LpOptimizedValue b
+($$) :: LpOptimizedValue (a -> b) -> a -> LpOptimizedValue b
 ($$) = LpApplication
 
 infixl 5 <$$>
 
-(<$$>) :: (a -> Scientific) -> LpOptimizedValue ('FiniteType a) -> LpOptimizedValue 'LpOptimizedFloat
+(<$$>) :: (a -> Scientific) -> LpOptimizedValue a -> LpOptimizedValue Scientific
 (<$$>) = LpFmap
 
 -- LpRelatedL :: LpOptimizedValue (a :<~> b) -> LpOptimizedValue a -> LpOptimizedValue b
 -- LpRelatedR :: LpOptimizedValue (a :<~> b) -> LpOptimizedValue b -> LpOptimizedValue a
 
 -- FIXME maybe this can profit from an intermediate step where I just resolve the value to variables
-recoverDecoded :: LpOptimizedValue a -> Reader (Map Variable LpLiteral) (DecodeLpOptimizedType a)
+recoverDecoded :: LpOptimizedValue a -> Reader (Map Variable LpLiteral) a
 recoverDecoded (LpOptimizedIntegerValue var) = asks $ \assignments ->
   maybe
     (error "recoverDecoded: integer var not among assignments")
@@ -206,7 +188,7 @@ class Varnameable a where
 
 -- FIXME maybe also require an example for feasibility?
 -- FIXME the proxy is annoying, try to remove it again
-optimal :: forall a ranges. (Contains a ranges, Varnameable a) => OptiM ranges (LpOptimizedValue (FiniteType a))
+optimal :: forall a ranges. (Contains a ranges, Varnameable a) => OptiM ranges (LpOptimizedValue a)
 optimal = do
   name <- freshIndex
   as <- myAsks (extract @a)
@@ -224,7 +206,7 @@ optimal = do
 optimalFunction ::
   forall a b ranges.
   (Contains a ranges, Contains b ranges, Ord a, Varnameable a, Varnameable b) =>
-  OptiM ranges (LpOptimizedValue (FiniteType a :~> FiniteType b))
+  OptiM ranges (LpOptimizedValue (a -> b))
 optimalFunction = do
   name <- freshIndex
   as <- myAsks (extract @a)
@@ -257,7 +239,7 @@ infix 4 <=!
 class LpComparable a b where
   (<=!) :: a -> b -> OptiM ranges ()
 
-instance LpComparable (LpOptimizedValue LpOptimizedInteger) Integer where
+instance LpComparable (LpOptimizedValue Integer) Integer where
   (LpSize (LpPreimage (LpOptimizedFunction varMap) b)) <=! i = do
     addConstraint
       LEQ
@@ -267,7 +249,7 @@ instance LpComparable (LpOptimizedValue LpOptimizedInteger) Integer where
         }
   _ <=! _ = error "<=!: Not yet implemented"
 
-instance LpComparable (LpOptimizedValue LpOptimizedFloat) (LpOptimizedValue LpOptimizedFloat) where
+instance LpComparable (LpOptimizedValue Scientific) (LpOptimizedValue Scientific) where
   LpFmap f (LpOptimizedFinite x) <=! LpFmap g (LpApplication (LpOptimizedFunction h) y) =
     addConstraint
       LEQ
@@ -303,7 +285,7 @@ instance {-# OVERLAPPABLE #-} (Contains a ranges) => Contains a (b ': ranges) wh
   extract = extract . tl
 
 -- FIXME Need a way to just extract the variables from an optimized value. What am I duplicating in comparison with recoverDecoded?
-better :: LpOptimizedValue LpOptimizedFloat -> OptiM ranges ()
+better :: LpOptimizedValue Scientific -> OptiM ranges ()
 better (LpFmap f (LpApplication (LpOptimizedFunction varMap) a)) =
   myTell
     $ mempty
@@ -314,7 +296,7 @@ better _ = error "better: Not yet implemented"
 better' :: LpValue -> OptiM ranges ()
 better' value = myTell $ mempty{objective = singleton value}
 
-runOptiM :: OptiM ranges (LpOptimizedValue a) -> NP [] ranges -> IO (DecodeLpOptimizedType a)
+runOptiM :: OptiM ranges (LpOptimizedValue a) -> NP [] ranges -> IO a
 runOptiM (OptiM ma) ranges = do
   let (a, declarations) = runReader (runWriterT $ evalAccumT ma 0) ranges
   let problem = mkProblem declarations
