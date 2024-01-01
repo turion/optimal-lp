@@ -1,7 +1,7 @@
 module Main where
 
 -- base
-import Control.Monad (forM_, guard)
+import Control.Monad (forM_, guard, when)
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.String (IsString)
 
@@ -53,14 +53,17 @@ lookupVote student topic = listToMaybe $ do
   guard $ topic == currentTopic
   pure vote
 
+lookupVote0 :: Student -> Topic -> Scientific
+lookupVote0 student topic = fromMaybe 0 $ lookupVote student topic
+
 capacity :: Topic -> Integer
 capacity "X" = 2
 capacity "Y" = 2
 
 problem :: OptiM '[Student, Topic] (LpOptimizedValue (FiniteType Student :~> FiniteType Topic))
 problem = do
-  topicOf <- optimalFunction @Student @Topic "topicOf"
-  forEvery @Student $ \student -> better $ LpFmap (fromMaybe 0 . lookupVote student) $ topicOf $$ student
+  topicOf <- optimalFunction @Student @Topic
+  forEvery @Student $ \student -> better $ lookupVote0 student <$$> topicOf $$ student
   forEvery @Topic $ \topic -> LpSize (LpPreimage topicOf topic) <=! capacity topic
   return topicOf
 
@@ -74,7 +77,27 @@ Ways to make it more complex:
 * optimize minimum student happiness
 -}
 
+-- problem2 :: OptiM '[Student, Topic] (LpOptimizedValue (FiniteType Student :~> FiniteType Topic), LpOptimizedValue (FiniteType Student))
+-- problem2 = do
+--   topicOf <- optimalFunction @Student @Topic "topicOf"
+--   forEvery @Topic $ \topic -> LpSize (LpPreimage topicOf topic) <=! capacity topic
+--   minimalStudent <- optimal @Student "minimalStudent"
+--   forEvery @Student $ \student -> (lookupVote0 <$$> minimalStudent) <$$> (topicOf <$$> minimalStudent) <=! lookupVote0 student <$$> topicOf $$ student
+--   return (topicOf, minimalStudent)
+
 main :: IO ()
 main = do
+  putStrLn "First problem"
+  putStrLn "-------------"
   topicOf <- runOptiM problem $ students :* topics :* Nil -- FIXME nicer constructors for this list
-  forM_ students $ \student -> print (student, topicOf student)
+  let optimalAssignment = [("alice", "X"), ("bob", "X"), ("charlotte", "Y"), ("daniel", "Y")]
+  forM_ students $ \student -> do
+    print (student, topicOf student)
+    when (lookup student optimalAssignment /= Just (topicOf student)) $ error "Ooops!"
+
+  -- putStrLn "--------------"
+  -- putStrLn "Second problem"
+  -- putStrLn "--------------"
+  -- (topicOf, minimalStudent) <- runOptiM problem2 $ students :* topics :* Nil -- FIXME nicer constructors for this list
+  -- print (minimalStudent, topicOf minimalStudent)
+  -- forM_ students $ \student -> print (student, topicOf student)

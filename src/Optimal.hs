@@ -4,9 +4,15 @@
 module Optimal where
 
 -- base
+import Control.Monad (forM, forM_)
+import Control.Monad.Trans.Class (lift)
 import Data.Kind hiding (Constraint)
+import Data.Maybe (fromMaybe)
+import Data.Monoid (Sum (getSum))
+import Data.Semigroup (Arg (..))
 
 -- transformers
+import Control.Monad.Trans.Accum (AccumT, add, evalAccumT, look, runAccumT)
 import Control.Monad.Trans.Reader (Reader, asks, runReader)
 import Control.Monad.Trans.Writer.CPS (WriterT, runWriterT, writer) -- FIXME performance?
 
@@ -14,7 +20,7 @@ import Control.Monad.Trans.Writer.CPS (WriterT, runWriterT, writer) -- FIXME per
 import Data.Text hiding (concat, singleton)
 
 -- containers
-import Data.Map (Map, elems, filter, fromList, fromSet, intersectionWith, keys, keysSet, lookup, mapKeys, null, restrictKeys, toAscList, toList, (!))
+import Data.Map (Map, argSet, elems, filter, fromList, fromSet, intersectionWith, keys, keysSet, lookup, mapKeys, null, restrictKeys, toAscList, toList, (!))
 import Data.Set
 
 -- sop-core
@@ -29,26 +35,29 @@ import Data.Scientific
 
 -- MIP
 
-import Control.Monad (forM, forM_)
-import Control.Monad.Trans.Class (lift)
-import Data.Maybe (fromMaybe)
 import Numeric.Optimization.MIP hiding (Constraint, constraints, name, variables)
 import Numeric.Optimization.MIP qualified as MIP
 import Numeric.Optimization.MIP.Solver (SolveOptions (solveErrorLogger, solveLogger), solve)
 import Numeric.Optimization.MIP.Solver.Glpsol
 
 -- FIXME make a transformer
-newtype OptiM (ranges :: [Type]) a = OptiM {getOptiM :: WriterT LpDeclarations (Reader (NP [] ranges)) a}
+newtype OptiM (ranges :: [Type]) a = OptiM {getOptiM :: AccumT (Sum Int) (WriterT LpDeclarations (Reader (NP [] ranges))) a}
   deriving (Functor, Applicative, Monad)
 
+freshIndex :: OptiM ranges Text
+freshIndex = OptiM $ do
+  i <- look
+  add 1
+  return $ pack $ show $ getSum i
+
 myWriter :: (a, LpDeclarations) -> OptiM ranges a
-myWriter = OptiM . writer
+myWriter = OptiM . lift . writer
 
 myTell :: LpDeclarations -> OptiM ranges ()
 myTell = myWriter . pure
 
 myAsks :: (NP [] ranges -> a) -> OptiM ranges a
-myAsks = OptiM . lift . asks
+myAsks = OptiM . lift . lift . asks
 
 {-
 instance Monad (OptiM ranges) where
@@ -82,10 +91,15 @@ data LpLiteral = IntegerLiteral Integer | FloatLiteral Scientific
 data LpValue = VariableValue Variable LpLiteral | LiteralValue LpLiteral
   deriving (Eq, Ord)
 
-data Constraint = Constraint
-  { smaller :: Set LpValue
-  , bigger :: Set LpValue
-  }
+data Constraint
+  = LEQ
+      { smaller :: Set LpValue
+      , bigger :: Set LpValue
+      }
+  | Equal
+      { lhs :: Set LpValue
+      , rhs :: Set LpValue
+      }
   deriving (Eq, Ord)
 
 data LpDeclarations = LpDeclarations
@@ -138,8 +152,15 @@ data LpOptimizedValue (a :: LpOptimizedType) where
   LpSize :: LpOptimizedValue (LpOptimizedSet a) -> LpOptimizedValue LpOptimizedInteger
   LpFmap :: (a -> Scientific) -> LpOptimizedValue (FiniteType a) -> LpOptimizedValue LpOptimizedFloat
 
+infixl 7 $$
+
 ($$) :: LpOptimizedValue ('FiniteType a ':~> b) -> a -> LpOptimizedValue b
 ($$) = LpApplication
+
+infixl 5 <$$>
+
+(<$$>) :: (a -> Scientific) -> LpOptimizedValue ('FiniteType a) -> LpOptimizedValue 'LpOptimizedFloat
+(<$$>) = LpFmap
 
 -- LpRelatedL :: LpOptimizedValue (a :<~> b) -> LpOptimizedValue a -> LpOptimizedValue b
 -- LpRelatedR :: LpOptimizedValue (a :<~> b) -> LpOptimizedValue b -> LpOptimizedValue a
@@ -185,15 +206,15 @@ class Varnameable a where
 
 -- FIXME maybe also require an example for feasibility?
 -- FIXME the proxy is annoying, try to remove it again
-optimal :: forall a ranges. (Contains a ranges, Varnameable a) => Text -> OptiM ranges (LpOptimizedValue (FiniteType a))
-optimal name = do
+optimal :: forall a ranges. (Contains a ranges, Varnameable a) => OptiM ranges (LpOptimizedValue (FiniteType a))
+optimal = do
+  name <- freshIndex
   as <- myAsks (extract @a)
-  -- FIXME Show is not so good, I should have a separate type class that can be derived generically that does safe names
-  let varsAndValues = Data.Map.fromList $ (\a -> (Variable{name = name <> "_" <> varname a, lpType = LpInteger (Just 0) (Just 1)}, a)) <$> as
+  let varsAndValues = Data.Map.fromList $ (\a -> (Variable{name = varname a <> "_" <> name, lpType = LpInteger (Just 0) (Just 1)}, a)) <$> as
       vars = keys varsAndValues
   forM_ vars declareVariable
   addConstraint
-    Constraint
+    LEQ
       { smaller = Data.Set.fromList $ flip VariableValue (IntegerLiteral 1) <$> vars
       , bigger = singleton (LiteralValue (IntegerLiteral 1))
       }
@@ -203,9 +224,9 @@ optimal name = do
 optimalFunction ::
   forall a b ranges.
   (Contains a ranges, Contains b ranges, Ord a, Varnameable a, Varnameable b) =>
-  Text ->
   OptiM ranges (LpOptimizedValue (FiniteType a :~> FiniteType b))
-optimalFunction name = do
+optimalFunction = do
+  name <- freshIndex
   as <- myAsks (extract @a)
   bs <- myAsks (extract @b)
   let varsAndValues =
@@ -213,7 +234,7 @@ optimalFunction name = do
           $ ( \a ->
                 ( a
                 , Data.Map.fromList
-                    $ (\b -> (Variable{name = name <> "_" <> varname a <> "_" <> varname b, lpType = LpInteger (Just 0) (Just 1)}, b))
+                    $ (\b -> (Variable{name = varname a <> "_" <> varname b <> "_" <> name, lpType = LpInteger (Just 0) (Just 1)}, b))
                     <$> bs
                 )
             )
@@ -224,31 +245,45 @@ optimalFunction name = do
         vars = keys mapB
     forM_ vars declareVariable
     addConstraint
-      Constraint
-        { smaller = Data.Set.fromList $ flip VariableValue (IntegerLiteral 1) <$> vars
-        , bigger = singleton (LiteralValue (IntegerLiteral 1))
-        }
-    addConstraint -- FIXME I want equality constraints as well!
-      Constraint
-        { bigger = Data.Set.fromList $ flip VariableValue (IntegerLiteral 1) <$> vars
-        , smaller = singleton (LiteralValue (IntegerLiteral 1))
+      Equal
+        { lhs = Data.Set.fromList $ flip VariableValue (IntegerLiteral 1) <$> vars
+        , rhs = singleton (LiteralValue (IntegerLiteral 1))
         }
   return $ LpOptimizedFunction varsAndValues
 
-(<=!) :: LpOptimizedValue LpOptimizedInteger -> Integer -> OptiM ranges ()
-(LpSize (LpPreimage (LpOptimizedFunction varMap) b)) <=! i = do
-  addConstraint
-    Constraint
-      { -- FIXME it's annoying with the factor 1 here and there, this should not be necessary
-        smaller = unions $ Data.Map.elems $ fmap (keysSet . Data.Map.mapKeys (`VariableValue` IntegerLiteral 1)) $ Data.Map.filter (== b) <$> varMap
-      , bigger = singleton (LiteralValue (IntegerLiteral i))
-      }
-_ <=! _ = error "<=!: Not yet implemented"
+infix 4 <=!
+
+-- FIXME naming: "constrainable"? or something else?
+class LpComparable a b where
+  (<=!) :: a -> b -> OptiM ranges ()
+
+instance LpComparable (LpOptimizedValue LpOptimizedInteger) Integer where
+  (LpSize (LpPreimage (LpOptimizedFunction varMap) b)) <=! i = do
+    addConstraint
+      LEQ
+        { -- FIXME it's annoying with the factor 1 here and there, this should not be necessary
+          smaller = unions $ Data.Map.elems $ fmap (keysSet . Data.Map.mapKeys (`VariableValue` IntegerLiteral 1)) $ Data.Map.filter (== b) <$> varMap
+        , bigger = singleton (LiteralValue (IntegerLiteral i))
+        }
+  _ <=! _ = error "<=!: Not yet implemented"
+
+instance LpComparable (LpOptimizedValue LpOptimizedFloat) (LpOptimizedValue LpOptimizedFloat) where
+  LpFmap f (LpOptimizedFinite x) <=! LpFmap g (LpApplication (LpOptimizedFunction h) y) =
+    addConstraint
+      LEQ
+        { smaller = Data.Set.map (\(Arg var val) -> VariableValue var (FloatLiteral val)) $ Data.Map.argSet $ f <$> x
+        , bigger = Data.Set.map (\(Arg var val) -> VariableValue var (FloatLiteral val)) $ Data.Map.argSet $ g <$> h ! y
+        }
+  -- \$ do
+  --   (var, a) <- Data.Map.toList x
+  --   (var', b) <- Data.Map.toList $ h ! y
+  --   _
+  _ <=! _ = error "<=!: Not yet implemented"
 
 (<=!!) :: LpValue -> LpValue -> OptiM ranges ()
 smaller <=!! bigger =
   addConstraint
-    Constraint
+    LEQ
       { smaller = singleton smaller
       , bigger = singleton bigger
       }
@@ -281,7 +316,7 @@ better' value = myTell $ mempty{objective = singleton value}
 
 runOptiM :: OptiM ranges (LpOptimizedValue a) -> NP [] ranges -> IO (DecodeLpOptimizedType a)
 runOptiM (OptiM ma) ranges = do
-  let (a, declarations) = runReader (runWriterT ma) ranges
+  let (a, declarations) = runReader (runWriterT $ evalAccumT ma 0) ranges
   let problem = mkProblem declarations
   result <- runLp declarations problem -- FIXME maybe this should return a map right away
   return $ runReader (recoverDecoded a) $ Data.Map.mapKeys variableAssigned $ Data.Map.fromSet resultAssigned result
@@ -306,7 +341,8 @@ mkProblem
       }
 
 constraintToMIP :: Constraint -> MIP.Constraint Scientific
-constraintToMIP Constraint{smaller, bigger} = lpValuesToExpr smaller .<=. lpValuesToExpr bigger
+constraintToMIP LEQ{smaller, bigger} = lpValuesToExpr smaller .<=. lpValuesToExpr bigger
+constraintToMIP Equal{lhs, rhs} = lpValuesToExpr lhs .==. lpValuesToExpr rhs
 
 -- MIP.Constraint
 --   { constrLabel = Nothing -- FIXME should be able to supply one
