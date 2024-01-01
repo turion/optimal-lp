@@ -4,7 +4,7 @@
 module Optimal where
 
 -- base
-import Control.Monad (forM, forM_)
+import Control.Monad (forM_)
 import Control.Monad.Trans.Class (lift)
 import Data.Kind hiding (Constraint)
 import Data.Maybe (fromMaybe)
@@ -12,7 +12,7 @@ import Data.Monoid (Sum (getSum))
 import Data.Semigroup (Arg (..))
 
 -- transformers
-import Control.Monad.Trans.Accum (AccumT, add, evalAccumT, look, runAccumT)
+import Control.Monad.Trans.Accum (AccumT, add, evalAccumT, look)
 import Control.Monad.Trans.Reader (Reader, asks, runReader)
 import Control.Monad.Trans.Writer.CPS (WriterT, runWriterT, writer) -- FIXME performance?
 
