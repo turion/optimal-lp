@@ -187,7 +187,6 @@ class Varnameable a where
   varname :: a -> Text
 
 -- FIXME maybe also require an example for feasibility?
--- FIXME the proxy is annoying, try to remove it again
 optimal :: forall a ranges. (Contains a ranges, Varnameable a) => OptiM ranges (LpOptimizedValue a)
 optimal = do
   name <- freshIndex
