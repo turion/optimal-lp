@@ -4,6 +4,7 @@
 module Optimal where
 
 -- base
+import Control.Arrow (first)
 import Control.Monad (forM, forM_)
 import Control.Monad.Trans.Class (lift)
 import Data.Kind hiding (Constraint)
@@ -185,31 +186,27 @@ recoverDecoded (LpFmap _ _) = error "recoverDecoded: LpFmap: Not yet implemented
 class Varnameable a where
   varname :: a -> Text
 
-class (Varnameable (Specify a), Varnameable (ConstrainOn a)) => Optimal ranges a where
-  -- FIXME maybe also require an example for feasibility?
+class (Varnameable (Specify a), Varnameable (ConstrainOn a), FiniteIn ranges (ConstrainOn a), FiniteIn ranges (Specify a)) => Optimal ranges a where
   type ConstrainOn a :: Type
   type Specify a :: Type
   optimal :: OptiM ranges (LpOptimizedValue a)
   optimal = do
     let proxy = Proxy @a
     i <- freshIndex
-    constrainOns <- constrainVars proxy
-    varsAndValues <- forM constrainOns $ \constrainOn -> do
-      specified <- names proxy constrainOn
+    constrainVars <- listAll
+    varsAndValues <- forM constrainVars $ \constrainOn -> do
+      specified <- listAll
       let varsAndValues = Data.Map.fromList $ (\a -> (Variable{name = "var_" <> varname constrainOn <> "_" <> varname a <> "_" <> i, lpType = LpInteger (Just 0) (Just 1)}, a)) <$> specified
           vars = keys varsAndValues
       forM_ vars declareVariable
       mapM_ addConstraint =<< constraints proxy constrainOn vars
       return (constrainOn, varsAndValues)
     value proxy varsAndValues
-  example :: OptiM ranges a
-  constrainVars :: Proxy a -> OptiM ranges [ConstrainOn a]
-  names :: Proxy a -> ConstrainOn a -> OptiM ranges [Specify a]
   constraints :: Proxy a -> ConstrainOn a -> [Variable] -> OptiM ranges [Constraint]
   value :: Proxy a -> [(ConstrainOn a, Map Variable (Specify a))] -> OptiM ranges (LpOptimizedValue a)
 
 newtype Finite a = Finite {getFinite :: a}
-  deriving (Show)
+  deriving (Show, Eq, Ord)
 
 instance (Varnameable a) => Varnameable (Finite a) where
   varname = varname . getFinite
@@ -217,19 +214,28 @@ instance (Varnameable a) => Varnameable (Finite a) where
 instance Varnameable () where
   varname () = "unit"
 
+instance (Varnameable a, Varnameable b) => Varnameable (a, b) where
+  varname (a, b) = varname a <> "_" <> varname b
+
 class FiniteIn ranges a where
   listAll :: OptiM ranges [a]
 
-instance Contains a ranges => FiniteIn ranges (Finite a) where
+instance (Contains a ranges) => FiniteIn ranges (Finite a) where
   listAll = myAsks $ fmap Finite . extract
+
+instance FiniteIn ranges () where
+  listAll = return [()]
+
+instance (FiniteIn ranges a, FiniteIn ranges b) => FiniteIn ranges (a, b) where
+  listAll = do
+    as <- listAll
+    bs <- listAll
+    return $ (,) <$> as <*> bs
 
 instance forall a ranges. (Contains a ranges, Varnameable a) => Optimal ranges (Finite a) where
   type ConstrainOn (Finite a) = ()
-  type Specify (Finite a) = a
+  type Specify (Finite a) = Finite a
 
-  example = myAsks $ head . fmap Finite . extract
-  constrainVars _ = pure [()]
-  names _ () = myAsks $ extract @a
   constraints _ () vars =
     pure
       [ LEQ
@@ -237,39 +243,26 @@ instance forall a ranges. (Contains a ranges, Varnameable a) => Optimal ranges (
           , bigger = singleton (LiteralValue (IntegerLiteral 1))
           }
       ]
-  value _ = return . LpOptimizedFinite . Data.Map.unions . fmap (fmap Finite . snd)
+  value _ = return . LpOptimizedFinite . Data.Map.unions . fmap snd
 
+instance (Optimal ranges a, Optimal ranges b, Varnameable a, FiniteIn ranges a, Ord a, FiniteIn ranges b, Varnameable b) => Optimal ranges (a -> b) where
+  -- FIXME Find a more complex example where I need the ConstrainOn b. Or maybe it's never needed?
+  type ConstrainOn (a -> b) = (a, ConstrainOn b)
+  type Specify (a -> b) = b
+  constraints _ (a, constrainOn) vars =
+    pure
+      $ pure
+        Equal
+          { lhs = Data.Set.fromList $ flip VariableValue (IntegerLiteral 1) <$> vars
+          , rhs = singleton (LiteralValue (IntegerLiteral 1))
+          }
+  value _ = return . LpOptimizedFunction . Data.Map.fromList . fmap (first fst)
 
--- FIXME What repetition can be avoided when comparing with optimal? Can I maybe make a type class?
-optimalFunction ::
-  forall a b ranges.
-  (Contains a ranges, Contains b ranges, Ord a, Varnameable a, Varnameable b) =>
-  OptiM ranges (LpOptimizedValue (a -> b))
-optimalFunction = do
-  name <- freshIndex
-  as <- myAsks (extract @a)
-  bs <- myAsks (extract @b)
-  let varsAndValues =
-        Data.Map.fromList
-          $ ( \a ->
-                ( a
-                , Data.Map.fromList
-                    $ (\b -> (Variable{name = varname a <> "_" <> varname b <> "_" <> name, lpType = LpInteger (Just 0) (Just 1)}, b))
-                    <$> bs
-                )
-            )
-          <$> as
-      vars = concat $ Data.Map.elems $ keys <$> varsAndValues
-  forM_ as $ \a -> do
-    let Just mapB = Data.Map.lookup a varsAndValues
-        vars = keys mapB
-    forM_ vars declareVariable
-    addConstraint
-      Equal
-        { lhs = Data.Set.fromList $ flip VariableValue (IntegerLiteral 1) <$> vars
-        , rhs = singleton (LiteralValue (IntegerLiteral 1))
-        }
-  return $ LpOptimizedFunction varsAndValues
+-- optimalFunction ::
+--   forall a b ranges.
+--   (Contains a ranges, Contains b ranges, Ord a, Varnameable a, Varnameable b) =>
+--   OptiM ranges (LpOptimizedValue (a -> b))
+-- optimalFunction = _ <$> optimal
 
 infix 4 <=!
 
@@ -308,9 +301,9 @@ smaller <=!! bigger =
       , bigger = singleton bigger
       }
 
-forEvery :: (Contains a ranges) => (a -> OptiM ranges b) -> OptiM ranges ()
+forEvery :: (Contains a ranges) => (Finite a -> OptiM ranges b) -> OptiM ranges ()
 forEvery f = do
-  as <- myAsks extract
+  as <- myAsks $ fmap Finite . extract
   forM_ as f
 
 class Contains a ranges where

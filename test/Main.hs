@@ -60,11 +60,12 @@ capacity :: Topic -> Integer
 capacity "X" = 2
 capacity "Y" = 2
 
-problem :: OptiM '[Student, Topic] (LpOptimizedValue (Student -> Topic))
+problem :: OptiM '[Student, Topic] (LpOptimizedValue (Finite Student -> Finite Topic))
 problem = do
-  topicOf <- optimalFunction @Student @Topic
-  forEvery @Student $ \student -> better $ lookupVote0 student <$$> topicOf $$ student
-  forEvery @Topic $ \topic -> LpSize (LpPreimage topicOf topic) <=! capacity topic
+  -- FIXME I should have fmap for LpOptimizedValue
+  topicOf <- optimal @_ @(Finite Student -> Finite Topic)
+  forEvery @Student $ \student -> better $ (lookupVote0 (getFinite student) . getFinite) <$$> topicOf $$ student
+  forEvery @Topic $ \(Finite topic) -> LpSize (LpPreimage topicOf (Finite topic)) <=! capacity topic
   return topicOf
 
 {-
@@ -92,8 +93,8 @@ main = do
   topicOf <- runOptiM problem $ students :* topics :* Nil -- FIXME nicer constructors for this list
   let optimalAssignment = [("alice", "X"), ("bob", "X"), ("charlotte", "Y"), ("daniel", "Y")]
   forM_ students $ \student -> do
-    print (student, topicOf student)
-    when (lookup student optimalAssignment /= Just (topicOf student)) $ error "Ooops!"
+    print (student, topicOf $ Finite student)
+    when (lookup student optimalAssignment /= Just (getFinite $ topicOf $ Finite student)) $ error "Ooops!"
 
   -- putStrLn "--------------"
   -- putStrLn "Second problem"
