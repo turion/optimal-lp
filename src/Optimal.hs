@@ -4,7 +4,7 @@
 module Optimal where
 
 -- base
-import Control.Monad (forM_)
+import Control.Monad (forM, forM_)
 import Control.Monad.Trans.Class (lift)
 import Data.Kind hiding (Constraint)
 import Data.Maybe (fromMaybe)
@@ -17,10 +17,10 @@ import Control.Monad.Trans.Reader (Reader, asks, runReader)
 import Control.Monad.Trans.Writer.CPS (WriterT, runWriterT, writer) -- FIXME performance?
 
 -- text
-import Data.Text hiding (concat, singleton)
+import Data.Text hiding (concat, head, singleton)
 
 -- containers
-import Data.Map (Map, argSet, elems, filter, fromList, fromSet, intersectionWith, keys, keysSet, lookup, mapKeys, null, restrictKeys, toAscList, toList, (!))
+import Data.Map (Map, argSet, elems, filter, fromList, fromSet, intersectionWith, keys, keysSet, lookup, mapKeys, null, restrictKeys, toAscList, toList, unions, (!))
 import Data.Set
 
 -- sop-core
@@ -34,8 +34,7 @@ import Data.SOP
 import Data.Scientific
 
 -- MIP
-
-import Numeric.Optimization.MIP hiding (Constraint, constraints, name, variables)
+import Numeric.Optimization.MIP hiding (Constraint, Finite, constraints, name, variables, vars)
 import Numeric.Optimization.MIP qualified as MIP
 import Numeric.Optimization.MIP.Solver (SolveOptions (solveErrorLogger, solveLogger), solve)
 import Numeric.Optimization.MIP.Solver.Glpsol
@@ -186,20 +185,60 @@ recoverDecoded (LpFmap _ _) = error "recoverDecoded: LpFmap: Not yet implemented
 class Varnameable a where
   varname :: a -> Text
 
--- FIXME maybe also require an example for feasibility?
-optimal :: forall a ranges. (Contains a ranges, Varnameable a) => OptiM ranges (LpOptimizedValue a)
-optimal = do
-  name <- freshIndex
-  as <- myAsks (extract @a)
-  let varsAndValues = Data.Map.fromList $ (\a -> (Variable{name = varname a <> "_" <> name, lpType = LpInteger (Just 0) (Just 1)}, a)) <$> as
-      vars = keys varsAndValues
-  forM_ vars declareVariable
-  addConstraint
-    LEQ
-      { smaller = Data.Set.fromList $ flip VariableValue (IntegerLiteral 1) <$> vars
-      , bigger = singleton (LiteralValue (IntegerLiteral 1))
-      }
-  return $ LpOptimizedFinite varsAndValues
+class (Varnameable (Specify a), Varnameable (ConstrainOn a)) => Optimal ranges a where
+  -- FIXME maybe also require an example for feasibility?
+  type ConstrainOn a :: Type
+  type Specify a :: Type
+  optimal :: OptiM ranges (LpOptimizedValue a)
+  optimal = do
+    let proxy = Proxy @a
+    i <- freshIndex
+    constrainOns <- constrainVars proxy
+    varsAndValues <- forM constrainOns $ \constrainOn -> do
+      specified <- names proxy constrainOn
+      let varsAndValues = Data.Map.fromList $ (\a -> (Variable{name = "var_" <> varname constrainOn <> "_" <> varname a <> "_" <> i, lpType = LpInteger (Just 0) (Just 1)}, a)) <$> specified
+          vars = keys varsAndValues
+      forM_ vars declareVariable
+      mapM_ addConstraint =<< constraints proxy constrainOn vars
+      return (constrainOn, varsAndValues)
+    value proxy varsAndValues
+  example :: OptiM ranges a
+  constrainVars :: Proxy a -> OptiM ranges [ConstrainOn a]
+  names :: Proxy a -> ConstrainOn a -> OptiM ranges [Specify a]
+  constraints :: Proxy a -> ConstrainOn a -> [Variable] -> OptiM ranges [Constraint]
+  value :: Proxy a -> [(ConstrainOn a, Map Variable (Specify a))] -> OptiM ranges (LpOptimizedValue a)
+
+newtype Finite a = Finite {getFinite :: a}
+  deriving (Show)
+
+instance (Varnameable a) => Varnameable (Finite a) where
+  varname = varname . getFinite
+
+instance Varnameable () where
+  varname () = "unit"
+
+class FiniteIn ranges a where
+  listAll :: OptiM ranges [a]
+
+instance Contains a ranges => FiniteIn ranges (Finite a) where
+  listAll = myAsks $ fmap Finite . extract
+
+instance forall a ranges. (Contains a ranges, Varnameable a) => Optimal ranges (Finite a) where
+  type ConstrainOn (Finite a) = ()
+  type Specify (Finite a) = a
+
+  example = myAsks $ head . fmap Finite . extract
+  constrainVars _ = pure [()]
+  names _ () = myAsks $ extract @a
+  constraints _ () vars =
+    pure
+      [ LEQ
+          { smaller = Data.Set.fromList $ flip VariableValue (IntegerLiteral 1) <$> vars
+          , bigger = singleton (LiteralValue (IntegerLiteral 1))
+          }
+      ]
+  value _ = return . LpOptimizedFinite . Data.Map.unions . fmap (fmap Finite . snd)
+
 
 -- FIXME What repetition can be avoided when comparing with optimal? Can I maybe make a type class?
 optimalFunction ::
@@ -243,7 +282,7 @@ instance LpComparable (LpOptimizedValue Integer) Integer where
     addConstraint
       LEQ
         { -- FIXME it's annoying with the factor 1 here and there, this should not be necessary
-          smaller = unions $ Data.Map.elems $ fmap (keysSet . Data.Map.mapKeys (`VariableValue` IntegerLiteral 1)) $ Data.Map.filter (== b) <$> varMap
+          smaller = Data.Set.unions $ Data.Map.elems $ fmap (keysSet . Data.Map.mapKeys (`VariableValue` IntegerLiteral 1)) $ Data.Map.filter (== b) <$> varMap
         , bigger = singleton (LiteralValue (IntegerLiteral i))
         }
   _ <=! _ = error "<=!: Not yet implemented"
@@ -348,7 +387,7 @@ literalToScientific (FloatLiteral f) = f
 
 lpTypeToBounds :: LpType -> Bounds Scientific
 lpTypeToBounds (LpInteger lowerBound upperBound) = (maybe NegInf fromInteger lowerBound, maybe PosInf fromInteger upperBound)
-lpTypeToBounds (LpFloat lowerBound upperBound) = (maybe NegInf Finite lowerBound, maybe PosInf Finite upperBound)
+lpTypeToBounds (LpFloat lowerBound upperBound) = (maybe NegInf MIP.Finite lowerBound, maybe PosInf MIP.Finite upperBound)
 
 lpTypeToVarType :: LpType -> VarType
 lpTypeToVarType (LpInteger _ _) = IntegerVariable
